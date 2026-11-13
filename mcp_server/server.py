@@ -1,7 +1,7 @@
-"""Authenticated MCP adapter for the existing Daily Stock Analysis API."""
+"""Auth0-protected MCP adapter for the existing Daily Stock Analysis API."""
 from __future__ import annotations
 
-import hmac
+import contextlib
 import json
 import os
 from typing import Any
@@ -9,7 +9,13 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 import uvicorn
-from mcp.server.fastmcp import FastMCP
+from auth0_api_python import ApiClient, ApiClientOptions
+from auth0_api_python.errors import VerifyAccessTokenError
+from mcp.server.auth.routes import create_protected_resource_routes
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import Tool as MCPTool
+from starlette.applications import Starlette
+from starlette.routing import Mount
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 API_BASE_URL = os.getenv("DSA_API_BASE_URL", "http://127.0.0.1:8000").strip().rstrip("/")
@@ -22,22 +28,76 @@ if parsed_api_url.scheme not in {"http", "https"} or not parsed_api_url.netloc:
     raise RuntimeError("DSA_API_BASE_URL must be an http(s) URL or host:port")
 
 API_TOKEN = os.getenv("DSA_API_BEARER_TOKEN", "").strip()
-MCP_BEARER_TOKEN = os.getenv("MCP_BEARER_TOKEN", "").strip()
+if not API_TOKEN:
+    raise RuntimeError("DSA_API_BEARER_TOKEN must be set")
+
 REQUEST_TIMEOUT = float(os.getenv("DSA_API_TIMEOUT_SECONDS", "45"))
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 # Render provides PORT=10000. Local Docker runs use MCP_PORT=8001.
 MCP_PORT = int(os.getenv("PORT") or os.getenv("MCP_PORT", "8001"))
 
-if not API_TOKEN:
-    raise RuntimeError("DSA_API_BEARER_TOKEN must be set")
-if not MCP_BEARER_TOKEN:
-    raise RuntimeError("MCP_BEARER_TOKEN must be set")
+AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "").strip()
+AUTH0_DOMAIN = AUTH0_DOMAIN.removeprefix("https://").removeprefix("http://").rstrip("/")
+if AUTH0_DOMAIN and ("/" in AUTH0_DOMAIN or ":" in AUTH0_DOMAIN):
+    raise RuntimeError("AUTH0_DOMAIN must be a tenant hostname without a path or port")
 
-mcp = FastMCP(
+MCP_PUBLIC_URL = os.getenv("MCP_PUBLIC_URL", "").strip().rstrip("/")
+if not MCP_PUBLIC_URL:
+    render_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    MCP_PUBLIC_URL = (
+        f"https://{render_hostname}"
+        if render_hostname
+        else f"http://localhost:{MCP_PORT}"
+    )
+parsed_public_url = urlsplit(MCP_PUBLIC_URL)
+if parsed_public_url.scheme not in {"http", "https"} or not parsed_public_url.netloc:
+    raise RuntimeError("MCP_PUBLIC_URL must be an http(s) URL")
+# Auth0's API identifier must match the resource value advertised below.
+# On Render this defaults to the service's stable public HTTPS origin.
+AUTH0_AUDIENCE = os.getenv("AUTH0_AUDIENCE", MCP_PUBLIC_URL).strip().rstrip("/")
+parsed_audience = urlsplit(AUTH0_AUDIENCE)
+if parsed_audience.scheme not in {"http", "https"} or not parsed_audience.netloc:
+    raise RuntimeError("AUTH0_AUDIENCE must be an http(s) URL")
+
+AUTH0_ISSUER = f"https://{AUTH0_DOMAIN}" if AUTH0_DOMAIN else ""
+RESOURCE_METADATA_URL = (
+    f"{MCP_PUBLIC_URL}/.well-known/oauth-protected-resource"
+)
+AUTH0_CLIENT = (
+    ApiClient(ApiClientOptions(domain=AUTH0_DOMAIN, audience=AUTH0_AUDIENCE))
+    if AUTH0_DOMAIN
+    else None
+)
+
+TOOL_SCOPES = {
+    "analyze_stock": ["dsa:analysis:run"],
+    "analyze_stocks": ["dsa:analysis:run"],
+    "market_review": ["dsa:analysis:run"],
+    "get_analysis_status": ["dsa:analysis:status"],
+}
+ALL_SCOPES = sorted({scope for scopes in TOOL_SCOPES.values() for scope in scopes})
+
+
+class OAuthFastMCP(FastMCP):
+    """Add ChatGPT's per-tool OAuth declarations to the SDK-generated tool list."""
+
+    async def list_tools(self) -> list[MCPTool]:
+        tools = await super().list_tools()
+        for tool in tools:
+            tool.meta = {
+                "securitySchemes": [
+                    {"type": "oauth2", "scopes": TOOL_SCOPES.get(tool.name, [])}
+                ]
+            }
+        return tools
+
+
+mcp = OAuthFastMCP(
     "Daily Stock Analysis",
     instructions="Use the existing DSA engine. Return its task IDs and reports without inventing missing data.",
     host=MCP_HOST,
     port=MCP_PORT,
+    stateless_http=True,
 )
 
 
@@ -82,14 +142,33 @@ def optional_fields(
     return result
 
 
+def require_scope(ctx: Context, required_scope: str) -> None:
+    """Enforce the OAuth scope declared for this MCP tool."""
+    try:
+        claims = ctx.request_context.request.state.auth
+    except (AttributeError, LookupError, ValueError):
+        claims = {}
+    granted_scopes = set(str(claims.get("scope", "")).split())
+    granted_scopes.update(claims.get("permissions", []))
+    if required_scope not in granted_scopes:
+        raise PermissionError(
+            f"Missing OAuth permission {required_scope}; reconnect the ChatGPT app "
+            "and approve the requested permission."
+        )
+
+
 @mcp.tool()
 async def analyze_stock(
     stock_code: str,
     skills: list[str] | None = None,
     report_language: str = "en",
     analysis_phase: str = "auto",
+    ctx: Context | None = None,
 ) -> str:
     """Submit one stock code for asynchronous DSA analysis."""
+    if ctx is None:
+        raise PermissionError("An authenticated MCP request is required.")
+    require_scope(ctx, "dsa:analysis:run")
     if not stock_code.strip():
         raise ValueError("stock_code must not be empty")
     payload = {"stock_code": stock_code.strip(), "async_mode": True}
@@ -106,8 +185,12 @@ async def analyze_stocks(
     skills: list[str] | None = None,
     report_language: str = "en",
     analysis_phase: str = "auto",
+    ctx: Context | None = None,
 ) -> str:
     """Submit multiple stock codes for asynchronous DSA analysis."""
+    if ctx is None:
+        raise PermissionError("An authenticated MCP request is required.")
+    require_scope(ctx, "dsa:analysis:run")
     codes = [code.strip() for code in stock_codes if code and code.strip()]
     if not codes:
         raise ValueError("stock_codes must contain at least one code")
@@ -124,8 +207,12 @@ async def market_review(
     region: str = "us",
     report_language: str = "en",
     send_notification: bool = False,
+    ctx: Context | None = None,
 ) -> str:
     """Start a market review for cn, hk, us, jp, kr, both, or a comma-separated subset."""
+    if ctx is None:
+        raise PermissionError("An authenticated MCP request is required.")
+    require_scope(ctx, "dsa:analysis:run")
     payload = {
         "region": region,
         "report_language": report_language,
@@ -138,8 +225,11 @@ async def market_review(
 
 
 @mcp.tool()
-async def get_analysis_status(task_id: str) -> str:
+async def get_analysis_status(task_id: str, ctx: Context | None = None) -> str:
     """Get progress or final result for a DSA task ID."""
+    if ctx is None:
+        raise PermissionError("An authenticated MCP request is required.")
+    require_scope(ctx, "dsa:analysis:status")
     if not task_id.strip():
         raise ValueError("task_id must not be empty")
     encoded_task_id = quote(task_id.strip(), safe="")
@@ -188,8 +278,8 @@ async def _respond(
     await send({"type": "http.response.body", "body": body})
 
 
-class BearerAuthAndHostGuard:
-    """Protect the MCP endpoint and reject requests for unconfigured hostnames."""
+class OAuthAuthAndHostGuard:
+    """Validate Auth0 access tokens and reject requests for unconfigured hostnames."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -221,28 +311,96 @@ class BearerAuthAndHostGuard:
             )
             return
 
-        authorization = request_headers.get(b"authorization", b"").decode("latin-1")
-        scheme, separator, presented_token = authorization.partition(" ")
-        valid_token = (
-            bool(separator)
-            and scheme.lower() == "bearer"
-            and bool(presented_token.strip())
-            and hmac.compare_digest(presented_token.strip(), MCP_BEARER_TOKEN)
-        )
-        if not valid_token:
+        if path == "/.well-known/oauth-protected-resource" and method in {"GET", "OPTIONS"}:
+            if not AUTH0_DOMAIN:
+                await _respond(
+                    scope,
+                    receive,
+                    send,
+                    503,
+                    b'{"error":"oauth_not_configured"}',
+                )
+                return
+            await self.app(scope, receive, send)
+            return
+
+        if AUTH0_CLIENT is None:
             await _respond(
                 scope,
                 receive,
                 send,
-                401,
-                b'{"error":"unauthorized"}',
-                extra_headers=[(b"www-authenticate", b"Bearer")],
+                503,
+                b'{"error":"oauth_not_configured"}',
             )
             return
 
+        authorization = request_headers.get(b"authorization", b"").decode("latin-1")
+        scheme, separator, presented_token = authorization.partition(" ")
+        if not separator or scheme.lower() != "bearer" or not presented_token.strip():
+            await self._unauthorized(scope, receive, send)
+            return
+
+        try:
+            claims = await AUTH0_CLIENT.verify_access_token(
+                presented_token.strip(),
+                required_claims=["sub"],
+            )
+        except VerifyAccessTokenError:
+            await self._unauthorized(scope, receive, send)
+            return
+
+        # FastMCP exposes the Starlette request in its tool Context.
+        scope.setdefault("state", {})["auth"] = claims
         await self.app(scope, receive, send)
+
+    async def _unauthorized(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        challenge = (
+            f'Bearer resource_metadata="{RESOURCE_METADATA_URL}", '
+            'error="invalid_token", error_description="Authentication is required."'
+        )
+        await _respond(
+            scope,
+            receive,
+            send,
+            401,
+            b'{"error":"unauthorized"}',
+            extra_headers=[(b"www-authenticate", challenge.encode("latin-1"))],
+        )
+
+
+metadata_routes = (
+    create_protected_resource_routes(
+        resource_url=AUTH0_AUDIENCE,
+        authorization_servers=[AUTH0_ISSUER],
+        scopes_supported=ALL_SCOPES,
+        resource_name="Daily Stock Analysis",
+    )
+    if AUTH0_DOMAIN
+    else []
+)
+mcp_http_app = mcp.streamable_http_app()
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: Starlette):
+    async with mcp.session_manager.run():
+        yield
+
+
+starlette_app = Starlette(
+    routes=[
+        *metadata_routes,
+        Mount("/", app=mcp_http_app),
+    ],
+    lifespan=lifespan,
+)
 
 
 if __name__ == "__main__":
-    app = BearerAuthAndHostGuard(mcp.streamable_http_app())
+    app = OAuthAuthAndHostGuard(starlette_app)
     uvicorn.run(app, host=MCP_HOST, port=MCP_PORT, log_level="info")
