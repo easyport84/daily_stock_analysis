@@ -46,8 +46,8 @@ services:
           type: pserv
           name: dsa-api
           envVarKey: DSA_API_BEARER_TOKEN
-      - key: MCP_BEARER_TOKEN
-        generateValue: true
+      - key: AUTH0_DOMAIN
+        sync: false
       - key: MCP_HOST
         value: 0.0.0.0
       - key: DSA_API_TIMEOUT_SECONDS
