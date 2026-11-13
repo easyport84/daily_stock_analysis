@@ -39,13 +39,11 @@ For an actual CBRS analysis, set a supported DSA model-provider key directly in 
 
 ## Connect ChatGPT
 
-The public MCP endpoint is:
+The public MCP endpoint is `https://<dsa-mcp-public-host>/mcp`. ChatGPT requires a public HTTPS endpoint for a remote server. However, this adapter currently uses a fixed bearer token, and ChatGPT's custom MCP connection flow does not offer a fixed bearer/API-key field. OpenAI currently documents OAuth, no authentication, or mixed OAuth/no-auth for that flow. Do not select no authentication for this protected analysis service.
 
-```
-https://<dsa-mcp-public-host>/mcp
-```
+Direct ChatGPT connection therefore needs an OAuth 2.1 identity-provider integration in front of the MCP tools. This branch does not yet implement that OAuth flow. The bearer-protected endpoint can be used by MCP clients that can send `Authorization: Bearer <MCP_BEARER_TOKEN>`; it is not yet ready to connect as a ChatGPT custom plugin.
 
-In ChatGPT, add a custom MCP server, use the HTTPS endpoint, and configure the supported bearer/API-key authentication with the value of `MCP_BEARER_TOKEN` from Render's Environment page. Do not expose the DSA API publicly. ChatGPT's custom MCP connection flow may be limited by workspace plan and admin policy; check availability in the target ChatGPT workspace.
+Custom MCP connections are available on ChatGPT web for Business and Enterprise/Edu workspaces, subject to workspace permissions. See [OpenAI's current setup guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) and [authentication guide](https://developers.openai.com/plugins/build/auth).
 
 ## Local run
 
