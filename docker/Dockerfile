@@ -65,14 +65,14 @@ RUN mkdir -p /tmp/futu-sdk-smoke-home && \
     HOME=/tmp/futu-sdk-smoke-home python -c "import src.services.screening.pipeline; import futu" && \
     rm -rf /tmp/futu-sdk-smoke-home
 
-# Keep the database, logs, and reports together under /app/data so one
-# Render persistent disk preserves all runtime data. Local Compose mounts for
-# /app/logs and /app/reports continue to work by replacing these symlinks.
-RUN mkdir -p /app/data/logs /app/data/reports /app/logs /app/reports && \
-    rm -rf /app/logs /app/reports && \
+# Keep mutable runtime state together under /app/data so one Render persistent
+# disk preserves the database, logs, reports, and Longbridge cache. Local Compose
+# mounts for /app/logs and /app/reports continue to work by replacing the symlinks.
+RUN mkdir -p /app/data/logs /app/data/reports /app/data/longbridge /app/logs /app/reports /home/dsa && \
     ln -s /app/data/logs /app/logs && \
     ln -s /app/data/reports /app/reports && \
-    chown -R dsa:dsa /app && \
+    ln -s /app/data/longbridge /home/dsa/.longbridge && \
+    chown -R dsa:dsa /app /home/dsa && \
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # efinance 将搜索缓存（search-cache.json）写入自身安装包内的 data 目录，
