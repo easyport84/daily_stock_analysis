@@ -65,14 +65,9 @@ RUN mkdir -p /tmp/futu-sdk-smoke-home && \
     HOME=/tmp/futu-sdk-smoke-home python -c "import src.services.screening.pipeline; import futu" && \
     rm -rf /tmp/futu-sdk-smoke-home
 
-# Keep mutable runtime state together under /app/data so one Render persistent
-# disk preserves the database, logs, reports, and Longbridge cache. Local Compose
-# mounts for /app/logs and /app/reports continue to work by replacing the symlinks.
-RUN mkdir -p /app/data/logs /app/data/reports /app/data/longbridge /app/logs /app/reports /home/dsa && \
-    ln -s /app/data/logs /app/logs && \
-    ln -s /app/data/reports /app/reports && \
-    ln -s /app/data/longbridge /home/dsa/.longbridge && \
-    chown -R dsa:dsa /app /home/dsa && \
+# 确保数据目录存在并授权给 non-root 用户
+RUN mkdir -p /app/data /app/logs /app/reports && \
+    chown -R dsa:dsa /app && \
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # efinance 将搜索缓存（search-cache.json）写入自身安装包内的 data 目录，
@@ -95,7 +90,7 @@ ENV API_PORT=8000
 EXPOSE 8000
 
 # 数据卷（持久化数据）
-VOLUME ["/app/data"]
+VOLUME ["/app/data", "/app/logs", "/app/reports"]
 
 # 健康检查（FastAPI 模式）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
