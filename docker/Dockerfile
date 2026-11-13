@@ -65,8 +65,13 @@ RUN mkdir -p /tmp/futu-sdk-smoke-home && \
     HOME=/tmp/futu-sdk-smoke-home python -c "import src.services.screening.pipeline; import futu" && \
     rm -rf /tmp/futu-sdk-smoke-home
 
-# 确保数据目录存在并授权给 non-root 用户
-RUN mkdir -p /app/data /app/logs /app/reports && \
+# Keep the database, logs, and reports together under /app/data so one
+# Render persistent disk preserves all runtime data. Local Compose mounts for
+# /app/logs and /app/reports continue to work by replacing these symlinks.
+RUN mkdir -p /app/data/logs /app/data/reports /app/logs /app/reports && \
+    rm -rf /app/logs /app/reports && \
+    ln -s /app/data/logs /app/logs && \
+    ln -s /app/data/reports /app/reports && \
     chown -R dsa:dsa /app && \
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
@@ -90,7 +95,7 @@ ENV API_PORT=8000
 EXPOSE 8000
 
 # 数据卷（持久化数据）
-VOLUME ["/app/data", "/app/logs", "/app/reports"]
+VOLUME ["/app/data"]
 
 # 健康检查（FastAPI 模式）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
