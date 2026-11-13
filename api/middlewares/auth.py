@@ -73,4 +73,3 @@ def add_auth_middleware(app):
     any runtime configuration reload.
     """
     app.add_middleware(AuthMiddleware)
-  
