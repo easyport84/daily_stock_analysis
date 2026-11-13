@@ -1,6 +1,6 @@
 # Daily Stock Analysis MCP adapter
 
-This service exposes the existing DSA FastAPI endpoints as MCP tools; it does not duplicate the analysis engine.
+This service exposes the existing DSA API as MCP tools; it does not duplicate the analysis engine.
 
 ## Tools
 
@@ -11,43 +11,56 @@ This service exposes the existing DSA FastAPI endpoints as MCP tools; it does no
 
 ## Authentication and configuration
 
-The MCP service rejects requests without a valid `Authorization: Bearer <MCP_BEARER_TOKEN>` header. Its upstream DSA API calls use a separate `DSA_API_BEARER_TOKEN`. Keep both values in Render's environment settings; never commit them or paste them into chat.
+The public MCP endpoint uses Auth0 OAuth. It validates the Auth0 access token on every MCP request, checks the token audience, issuer, expiry, and subject, and checks the required OAuth scope before running each tool. The `/healthz` endpoint and OAuth protected-resource metadata are public; the MCP endpoint is not. If Auth0 has not been configured, MCP requests fail closed with HTTP 503.
+
+The adapter uses a separate DSA bearer token for calls to the private DSA API. Keep that value in Render's environment settings; never commit it or paste it into chat.
 
 | Variable | Required | Purpose |
 |---|---:|---|
 | `DSA_API_BASE_URL` | yes | DSA API URL. Render Blueprint sets this to the private `dsa-api` host and port. |
 | `DSA_API_BEARER_TOKEN` | yes | Shared only between the DSA API and this adapter. |
-| `MCP_BEARER_TOKEN` | yes | Client credential for inbound MCP requests. |
+| `AUTH0_DOMAIN` | yes for MCP access | Auth0 tenant hostname, such as `my-tenant.us.auth0.com`; no client secret is used by the server. |
+| `AUTH0_AUDIENCE` | no | Auth0 API identifier. Defaults to `MCP_PUBLIC_URL`, which defaults to Render's public HTTPS hostname. It must exactly match the Auth0 API identifier. |
+| `MCP_PUBLIC_URL` | no | Canonical public resource URL; on Render it is derived from `RENDER_EXTERNAL_HOSTNAME`. Set this only for local development or a custom domain. |
 | `DSA_API_TIMEOUT_SECONDS` | no | Upstream timeout in seconds; defaults to `45`. |
 | `MCP_HOST` | no | Bind address; defaults to `0.0.0.0`. |
 | `PORT` | no | Render's assigned listening port. Takes precedence over `MCP_PORT`. |
 | `MCP_PORT` | no | Local listening port; defaults to `8001`. |
 | `MCP_ALLOWED_HOSTS` | no | Extra comma-separated Host names when running behind another proxy. Render's service hostname is allowed automatically. |
 
-The public `/healthz` endpoint only reports process liveness. All MCP routes, including `/mcp`, require bearer authentication. The upstream DSA API is a Render private service and also checks the separate bearer token.
+The MCP tools request these Auth0 API scopes:
+
+- `dsa:analysis:run` for `analyze_stock`, `analyze_stocks`, and `market_review`.
+- `dsa:analysis:status` for `get_analysis_status`.
 
 ## Deploy both services on Render
 
-The repository-root `render.yaml` defines two services on the `feat/chatgpt-mcp-adapter` branch:
+The repository-root `render.yaml` defines two Singapore services on the `feat/chatgpt-mcp-adapter` branch:
 
 - `dsa-api`: private Docker service using `docker/Dockerfile`, run in API-only mode.
-- `dsa-mcp`: public Docker web service using `mcp_server/Dockerfile`.
+- `dsa-mcp`: public Docker web service using `mcp_server/Dockerfile`, protected by Auth0 OAuth.
 
-Create a Blueprint from this repository and branch in Render. Review the proposed plans before approving deployment. Render generates both service tokens and wires the DSA API address into the adapter. The DSA service gets a 10 GB persistent disk mounted at `/app/data`; the Docker image stores the SQLite database, logs, reports, and Longbridge cache beneath that mount.
+Create a Blueprint from this repository and branch in Render. The Blueprint generates the internal DSA API bearer token and shares it only with the private API and MCP services. The DSA service gets a 10 GB persistent disk mounted at `/app/data`; the Docker image keeps the SQLite database, logs, reports, and Longbridge cache under that mount.
 
-For an actual CBRS analysis, set a supported DSA model-provider key directly in the `dsa-api` service's Render Environment page. Do not put provider credentials in this repository or in chat. DSA's `.env.example` documents supported providers. `TUSHARE_TOKEN` is for A-share data and is not required for US-listed CBRS. News search API keys are optional.
+The API service is configured as `1c-2g` and the disk is 10 GB. The MCP service uses Render's Free plan, which may sleep while idle. Review the Blueprint's current price before approving it. For an actual CBRS analysis, set one supported DSA model-provider key directly in the `dsa-api` service's Render Environment page. Never put provider credentials in this repository or in chat. DSA's `.env.example` documents supported providers. `TUSHARE_TOKEN` is for A-share data and is not required for US-listed CBRS. News search keys are optional.
 
-## Connect ChatGPT
+## Connect Auth0 and ChatGPT
 
-The public MCP endpoint is `https://<dsa-mcp-public-host>/mcp`. ChatGPT requires a public HTTPS endpoint for a remote server. However, this adapter currently uses a fixed bearer token, and ChatGPT's custom MCP connection flow does not offer a fixed bearer/API-key field. OpenAI currently documents OAuth, no authentication, or mixed OAuth/no-auth for that flow. Do not select no authentication for this protected analysis service.
+1. Create or sign in to an Auth0 tenant. Use its default tenant domain; a custom domain is unnecessary.
+2. In Render, open the `dsa-mcp` service and copy its public hostname. In Auth0, create an API with:
+   - Identifier: `https://<your-dsa-mcp-hostname>` (no trailing slash and no `/mcp` path)
+   - Signing algorithm: `RS256`
+   - Scopes: `dsa:analysis:run` and `dsa:analysis:status`
+3. In Auth0 tenant Settings > Advanced, enable **Resource Parameter Compatibility Profile** and **Include Issuer in Authorization Responses**. These settings support ChatGPT's resource-bound OAuth flow.
+4. Configure an Auth0 login connection and limit it to the people who should use the analysis tools. For a personal service, disable public sign-up and create your own Auth0 user.
+5. In Render's `dsa-mcp` Environment settings, set `AUTH0_DOMAIN` to the tenant hostname. Leave `AUTH0_AUDIENCE` unset so it uses the Render hostname as the audience. A redeploy applies the setting.
+6. In ChatGPT web, add a custom MCP server using `https://<your-dsa-mcp-hostname>/mcp` and choose OAuth when prompted. Auth0 handles the OAuth client registration; no Auth0 client secret belongs in Render or this repository.
 
-Direct ChatGPT connection therefore needs an OAuth 2.1 identity-provider integration in front of the MCP tools. This branch does not yet implement that OAuth flow. The bearer-protected endpoint can be used by MCP clients that can send `Authorization: Bearer <MCP_BEARER_TOKEN>`; it is not yet ready to connect as a ChatGPT custom plugin.
-
-Custom MCP connections are available on ChatGPT web for Business and Enterprise/Edu workspaces, subject to workspace permissions. See [OpenAI's current setup guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) and [authentication guide](https://developers.openai.com/plugins/build/auth).
+Auth0's free plan currently includes up to 25,000 monthly active users. [Auth0's MCP authorization guide](https://auth0.com/ai/docs/mcp/get-started/authorization-for-your-mcp-server) documents the tenant settings and API setup. [OpenAI's ChatGPT setup guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) currently supports custom MCP connections on ChatGPT web for Business and Enterprise/Edu workspaces; your workspace permissions must allow adding them.
 
 ## Local run
 
-Start the DSA API separately (normally on port 8000), then run the adapter:
+Start the DSA API separately (normally on port 8000), create an Auth0 API with identifier `http://localhost:8001` and the two scopes above, then run:
 
 ```bash
 cd mcp_server
@@ -55,11 +68,13 @@ python -m venv .venv
 pip install -r requirements.txt
 DSA_API_BASE_URL=http://127.0.0.1:8000 \
 DSA_API_BEARER_TOKEN=<local-dsa-token> \
-MCP_BEARER_TOKEN=<local-mcp-token> \
+AUTH0_DOMAIN=<your-tenant-domain> \
+AUTH0_AUDIENCE=http://localhost:8001 \
+MCP_PUBLIC_URL=http://localhost:8001 \
 python server.py
 ```
 
-The MCP Streamable HTTP endpoint is `http://localhost:8001/mcp`. Use temporary local tokens; do not use production credentials in local development.
+The MCP Streamable HTTP endpoint is `http://localhost:8001/mcp`. Use temporary local credentials; do not use production credentials in local development.
 
 ## Upstream API contract
 
