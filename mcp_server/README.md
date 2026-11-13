@@ -51,12 +51,13 @@ The API service is configured as `1c-2g` and the disk is 10 GB. The MCP service 
    - Identifier: `https://<your-dsa-mcp-hostname>` (no trailing slash and no `/mcp` path)
    - Signing algorithm: `RS256`
    - Scopes: `dsa:analysis:run` and `dsa:analysis:status`
+   - Enable **Allow Offline Access** in the API settings so ChatGPT can renew access after the first token expires.
 3. In Auth0 tenant Settings > Advanced, enable **Resource Parameter Compatibility Profile** and **Include Issuer in Authorization Responses**. These settings support ChatGPT's resource-bound OAuth flow.
 4. Configure an Auth0 login connection and limit it to the people who should use the analysis tools. For a personal service, disable public sign-up and create your own Auth0 user.
 5. In Render's `dsa-mcp` Environment settings, set `AUTH0_DOMAIN` to the tenant hostname. Leave `AUTH0_AUDIENCE` unset so it uses the Render hostname as the audience. A redeploy applies the setting.
 6. In ChatGPT web, add a custom MCP server using `https://<your-dsa-mcp-hostname>/mcp` and choose OAuth when prompted. Auth0 handles the OAuth client registration; no Auth0 client secret belongs in Render or this repository.
 
-Auth0's free plan currently includes up to 25,000 monthly active users. [Auth0's MCP authorization guide](https://auth0.com/ai/docs/mcp/get-started/authorization-for-your-mcp-server) documents the tenant settings and API setup. [OpenAI's ChatGPT setup guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) currently supports custom MCP connections on ChatGPT web for Business and Enterprise/Edu workspaces; your workspace permissions must allow adding them.
+Auth0's free plan currently includes up to 25,000 monthly active users. [Auth0's MCP authorization guide](https://auth0.com/ai/docs/mcp/get-started/authorization-for-your-mcp-server) documents the tenant settings and API setup. [OpenAI's ChatGPT setup guide](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt) currently supports custom MCP connections on ChatGPT web for Business and Enterprise/Edu workspaces; your workspace permissions must allow adding them. OpenAI recommends issuing refresh tokens for persistent OAuth connections; Auth0's **Allow Offline Access** setting enables that for the API.
 
 ## Local run
 
