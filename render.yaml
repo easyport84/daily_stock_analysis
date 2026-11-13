@@ -1,0 +1,54 @@
+services:
+  - type: pserv
+    name: dsa-api
+    runtime: docker
+    region: singapore
+    plan: 1c-2g
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    dockerCommand: python main.py --serve-only --host 0.0.0.0 --port 10000
+    autoDeployTrigger: commit
+    disk:
+      name: dsa-runtime-data
+      mountPath: /app/data
+      sizeGB: 10
+    envVars:
+      - key: API_PORT
+        value: "10000"
+      - key: DATABASE_PATH
+        value: /app/data/stock_analysis.db
+      - key: LOG_DIR
+        value: /app/logs
+      - key: STOCK_LIST
+        value: CBRS
+      - key: SCHEDULE_ENABLED
+        value: "false"
+      - key: DSA_API_BEARER_TOKEN
+        generateValue: true
+
+  - type: web
+    name: dsa-mcp
+    runtime: docker
+    region: singapore
+    plan: free
+    dockerfilePath: ./mcp_server/Dockerfile
+    dockerContext: ./mcp_server
+    autoDeployTrigger: commit
+    healthCheckPath: /healthz
+    envVars:
+      - key: DSA_API_BASE_URL
+        fromService:
+          type: pserv
+          name: dsa-api
+          property: hostport
+      - key: DSA_API_BEARER_TOKEN
+        fromService:
+          type: pserv
+          name: dsa-api
+          envVarKey: DSA_API_BEARER_TOKEN
+      - key: MCP_BEARER_TOKEN
+        generateValue: true
+      - key: MCP_HOST
+        value: 0.0.0.0
+      - key: DSA_API_TIMEOUT_SECONDS
+        value: "45"
